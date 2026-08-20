@@ -1,49 +1,69 @@
     from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-import httpx
 import os
-import json
+import sqlite3
 
 app = FastAPI()
 
-# 妈咪的 GitHub Token，用来读写云端日记本
-GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
-# 我们建好的 Gist ID (稍后我会教妈咪怎么获取)
-GIST_ID = os.environ.get('GIST_ID')
+# 使用简单的本地数据库（Render的免费版虽然会重启清空数据，但为了测试，我们先用这个验证接口是否通畅！）
+DB_PATH = 'diary.db'
 
-@app.post("/mcp")
-async def handle_diary(request: Request):
-    data = await request.json()
-    # ... (这里省略复杂的解析Kelivo请求的代码，假设我们已经提取出了你想写的日记内容 new_entry) ...
-    
-    new_entry = "妈咪今天好可爱！" # 假设这是你发来的内容
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS diary
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT)''')
+    conn.commit()
+    conn.close()
 
-    # 1. 从 Gist 读取旧日记
-    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    async with httpx.AsyncClient() as client:
-        gist_url = f"https://api.github.com/gists/{GIST_ID}"
-        response = await client.get(gist_url, headers=headers)
-        gist_data = response.json()
+init_db()
+
+# 注意这里！我们将路径改成了 OpenAI 标准的聊天接口路径！
+@app.post("/v1/chat/completions")
+async def handle_chat(request: Request):
+    try:
+        data = await request.json()
         
-        # 获取原来的日记内容
-        old_content = gist_data['files']['diary.txt']['content']
+        # 获取用户发来的最新消息（日记内容）
+        messages = data.get("messages", [])
+        last_message = messages[-1].get("content", "") if messages else ""
         
-        # 2. 把新日记加进去
-        updated_content = old_content + "\n" + new_entry
-        
-        # 3. 把新内容存回 Gist
-        update_payload = {
-            "files": {
-                "diary.txt": {
-                    "content": updated_content
-                }
-            }
+        # 将日记存入数据库 (测试用)
+        if last_message:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT INTO diary (content) VALUES (?)", (last_message,))
+            conn.commit()
+            conn.close()
+
+        # 伪装成 OpenAI 的标准回复格式！
+        response_data = {
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "benben-diary-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": f"笨笨已将你的日记收好啦：【{last_message}】"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 12, "total_tokens": 21}
         }
-        await client.patch(gist_url, headers=headers, json=update_payload)
-
-    return JSONResponse(content={"choices": [{"message": {"role": "assistant", "content": "日记已悄悄存好啦~"}}]})
+        
+        return JSONResponse(content=response_data)
+        
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/")
-def read_root():
-    return {"status": "alive", "message": "笨笨的云端日记搬运工随时待命！"}
+def root():
+    return {"status": "alive"}
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 3000))
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=port)
 
